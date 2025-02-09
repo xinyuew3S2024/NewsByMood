@@ -1,56 +1,125 @@
+import requests
+import json
 import streamlit as st
-from openai import OpenAI
+from langchain.agents import initialize_agent, Tool
+from langchain_community.chat_models import ChatOpenAI
+from langchain.memory import ConversationBufferMemory
+from langchain.schema import SystemMessage  # Import SystemMessage
+import os
+from urllib.parse import urlparse
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+# Get API keys from environment variables.
+SERP_API_KEY = os.environ.get("SERP_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+def get_news_articles(query: str) -> str:
+    params = {
+        'api_key': SERP_API_KEY,
+        'q': query,
+        'gl': 'us',
+        'hl': 'en',
+        # Uncomment the following line to restrict strictly to news results:
+        # 'tbm': 'nws',
+        'google_domain': 'google.com'
+    }
+    response = requests.get('https://api.scaleserp.com/search', params=params)
+    if response.status_code == 200:
+        result_json = response.json()
+        summaries = []
+        # Try "news_results" first.
+        if "news_results" in result_json and result_json["news_results"]:
+            articles = result_json["news_results"][:3]
+            for article in articles:
+                title = article.get("title", "No Title")
+                snippet = article.get("snippet", "No Summary")
+                link = article.get("link", "No Link")
+                summaries.append(f"Title: {title}\nSummary: {snippet}\nLink: {link}")
+            return "\n\n".join(summaries)
+        # If not available, try "top_stories".
+        elif "top_stories" in result_json and result_json["top_stories"]:
+            articles = result_json["top_stories"][:3]
+            for article in articles:
+                title = article.get("title", "No Title")
+                snippet = article.get("snippet", f"Source: {article.get('source', 'Unknown')}, Date: {article.get('date', 'Unknown')}")
+                link = article.get("link", "No Link")
+                summaries.append(f"Title: {title}\nSummary: {snippet}\nLink: {link}")
+            return "\n\n".join(summaries)
+        else:
+            return "No news results found. Raw response:\n" + json.dumps(result_json, indent=2)
+    else:
+        return f"Error: Unable to fetch data from SERP API, status code: {response.status_code}"
+
+# Wrap the news retrieval function as a LangChain Tool.
+serp_news_tool = Tool(
+    name="SERPNewsAPI",
+    func=get_news_articles,
+    description=(
+        "Fetches the latest news articles based on a given query. "
+        "Use this tool after determining the user's mood to retrieve tailored news."
+    )
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+# Define a system message with explicit instructions.
+system_message = (
+    "You are a friendly, mood-sensitive news assistant. "
+    "Always start by asking: 'How has your day been so far?' "
+    "Then, based on the user's answer, analyze their mood and map it to a news category as follows: "
+    "Happy → Comedy news, Sad → Politics news, Stressed → Business news, Excited → Sports news, Neutral → Technology news. "
+    "Once the mood and corresponding category are determined, construct a detailed query (for example, 'latest politics news') "
+    "and use the SERPNewsAPI tool to fetch three recent news articles. Respond in a friendly, conversational tone and conclude after delivering the news."
+)
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# Initialize the ChatOpenAI language model.
+llm = ChatOpenAI(temperature=1, model_name="gpt-4o", openai_api_key=OPENAI_API_KEY)
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+# Initialize conversation memory.
+memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# Add the system message to the conversation memory.
+memory.chat_memory.add_message(SystemMessage(content=system_message))
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+# Revised prompt instructing the assistant to always start with a mood inquiry.
+prompt_prefix = (
+    "Remember, you must always begin by asking: 'How has your day been so far?' "
+    "and only after obtaining the user's mood should you proceed to fetch news. "
+    "Analyze the user's mood, map it to the corresponding news category "
+    "(Happy → Comedy, Sad → Politics, Stressed → Business, Excited → Sports, Neutral → Technology), and then "
+    "construct a detailed news query accordingly (e.g., 'latest politics news'). "
+    "Finally, use the SERPNewsAPI tool to fetch three recent news articles and respond with a concise summary of each."
+)
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+# Initialize the conversational agent.
+agent = initialize_agent(
+    tools=[serp_news_tool],
+    llm=llm,
+    agent="chat-conversational-react-description",
+    memory=memory,
+    verbose=True,
+    handle_parsing_errors=True,
+    agent_kwargs={"prefix": prompt_prefix}
+)
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+def main():
+    st.title("Mood-Sensitive News Chatbot")
+    st.markdown("Type your message below to receive a summary of top news tailored to your mood.")
+    
+    # Use a form for user input.
+    with st.form(key="chat_form", clear_on_submit=True):
+        user_input = st.text_input("Your message:")
+        submitted = st.form_submit_button(label="Send")
+    
+    if submitted and user_input:
+        with st.spinner("Processing..."):
+            response = agent.run(user_input)
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+    # Display the conversation history from memory.
+    st.markdown("### Conversation History")
+    for msg in memory.chat_memory.messages:
+        if msg.type != "system":
+            st.markdown(f"**{msg.type.capitalize()}**: {msg.content}")
+
+    # if submitted and user_input:
+    #     st.write(response)
+
+if __name__ == "__main__":
+    main()
