@@ -78,16 +78,6 @@ memory = ConversationBufferMemory(memory_key="chat_history", return_messages=Tru
 # Add the system message to the conversation memory.
 memory.chat_memory.add_message(SystemMessage(content=system_message))
 
-# Revised prompt instructing the assistant to always start with a mood inquiry.
-prompt_prefix = (
-    "Remember, you must always begin by asking: 'How has your day been so far?' "
-    "and only after obtaining the user's mood should you proceed to fetch news. "
-    "Analyze the user's mood, map it to the corresponding news category "
-    "(Happy → Comedy, Sad → Politics, Stressed → Business, Excited → Sports, Neutral → Technology), and then "
-    "construct a detailed news query accordingly (e.g., 'latest politics news'). "
-    "Finally, use the SERPNewsAPI tool to fetch three recent news articles and respond with a concise summary of each."
-)
-
 # Initialize the conversational agent.
 agent = initialize_agent(
     tools=[serp_news_tool],
@@ -95,8 +85,7 @@ agent = initialize_agent(
     agent="chat-conversational-react-description",
     memory=memory,
     verbose=True,
-    handle_parsing_errors=True,
-    agent_kwargs={"prefix": prompt_prefix}
+    handle_parsing_errors=True
 )
 
 def main():
